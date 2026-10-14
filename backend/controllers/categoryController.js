@@ -1,5 +1,6 @@
 
 const Category = require("../models/Category");
+const Content = require("../models/Content");
 
 // Create Category
 const createCategory = async (req, res, next) => {
