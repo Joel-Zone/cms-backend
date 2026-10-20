@@ -1,19 +1,10 @@
-
-const dns = require("node:dns");
-dns.setServers(["8.8.8.8"]);
-
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
 require("dotenv").config();
 
-const User = require("./models/User");
+const bcrypt = require("bcryptjs");
+const prisma = require("./config/prisma");
 
 async function createAdmin() {
     try {
-        if (!process.env.MONGO_URI) {
-            throw new Error("MONGO_URI is missing from .env");
-        }
-
         const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
         const password = process.env.ADMIN_PASSWORD;
 
@@ -23,9 +14,11 @@ async function createAdmin() {
             );
         }
 
-        await mongoose.connect(process.env.MONGO_URI);
+        await prisma.$connect();
 
-        const existingUser = await User.findOne({ email });
+        const existingUser = await prisma.user.findUnique({
+            where: { email },
+        });
 
         if (existingUser) {
             console.log("A user with this email already exists.");
@@ -34,11 +27,13 @@ async function createAdmin() {
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const admin = await User.create({
-            name: "CMS Administrator",
-            email,
-            password: hashedPassword,
-            role: "admin",
+        const admin = await prisma.user.create({
+            data: {
+                name: "CMS Administrator",
+                email,
+                password: hashedPassword,
+                role: "admin",
+            },
         });
 
         console.log("Admin account created successfully.");
@@ -48,9 +43,7 @@ async function createAdmin() {
         console.error("Admin creation failed:", error.message);
         process.exitCode = 1;
     } finally {
-        if (mongoose.connection.readyState !== 0) {
-            await mongoose.disconnect();
-        }
+        await prisma.$disconnect();
     }
 }
 

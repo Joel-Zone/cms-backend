@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  name      String
+  email     String    @unique
+  password  String
+  role      String    @default("editor")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  contents  Content[]
+}
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String    @unique @db.VarChar(50)
+  description String    @default("") @db.VarChar(200)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  contents    Content[]
+}
+
+model Content {
+  id            String    @id @default(cuid())
+  title         String
+  slug          String    @unique
+  type          String
+  content       String
+  excerpt       String?
+  featuredImage String?
+  videoUrl      String?
+  videoSource   String?
+  authorId      String?
+  categoryId    String?
+  status        String    @default("draft")
+  views         Int       @default(0)
+  publishedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  author        User?     @relation(fields: [authorId], references: [id])
+  category      Category? @relation(fields: [categoryId], references: [id])
+}

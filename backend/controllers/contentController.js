@@ -1,7 +1,18 @@
-const Content = require("../models/Content"); //brings our Mongoose model into the controller.
+const prisma = require("../config/prisma");
 const generateSlug = require("../utils/generateSlug");
 
-const createContent = async (req, res, next) => { //contain the JSON that the React frontend eventually sends to us.
+const ALLOWED_TYPES = [
+    "article",
+    "news",
+    "page",
+    "announcement",
+];
+
+const isPrivilegedUser = (req) =>
+    req.user && ["admin", "editor"].includes(req.user.role);
+
+// Create Content
+const createContent = async (req, res, next) => {
     try {
         const {
             title,
@@ -14,54 +25,77 @@ const createContent = async (req, res, next) => { //contain the JSON that the Re
             category,
         } = req.body;
 
-        const slug = generateSlug(title);
+        if (
+            typeof title !== "string" ||
+            !title.trim() ||
+            typeof content !== "string" ||
+            !content.trim()
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Title and content are required",
+            });
+        }
 
-        const newContent = await Content.create({ //creates a new document in MongoDB.
-            title,
-            slug,
+        if (!ALLOWED_TYPES.includes(type)) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid content type. Allowed types are article, news, page, and announcement.",
+            });
+        }
+
+        const data = {
+            title: title.trim(),
+            slug: generateSlug(title.trim()),
             type,
             content,
-            excerpt,
-            featuredImage,
-            videoUrl,
-            videoSource,
-            category,
-            author: req.user.id,
-        });
+            authorId: req.user.id,
+        };
 
-        res.status(201).json({
+        if (excerpt !== undefined) data.excerpt = excerpt;
+        if (featuredImage !== undefined) {
+            data.featuredImage = featuredImage;
+        }
+        if (videoUrl !== undefined) data.videoUrl = videoUrl;
+        if (videoSource !== undefined) data.videoSource = videoSource;
+        if (category) data.categoryId = category;
+
+        const newContent = await prisma.content.create({ data });
+
+        return res.status(201).json({
             success: true,
             message: "Content created successfully",
             data: newContent,
         });
     } catch (error) {
+        if (error.code === "P2002") {
+            return res.status(409).json({
+                success: false,
+                message: "Content with this slug already exists",
+            });
+        }
+        if (error.code === "P2003") {
+            return res.status(400).json({
+                success: false,
+                message: "The selected author or category does not exist",
+            });
+        }
         next(error);
     }
 };
 
-//Get All Content -- GET
-
+// Get All Content
 const getAllContent = async (req, res, next) => {
     try {
-        // 1. Apply the visibility rule.
-        const filter =
-            req.user && ["admin", "editor"].includes(req.user.role)
-                ? {}
-                : { status: "published" };
-
-        // 2. Read query parameters.
         const { type, search } = req.query;
 
-        // 3. Validate the content type.
-        if (type) {
-            const allowedTypes = [
-                "article",
-                "news",
-                "page",
-                "announcement",
-            ];
+        const where = isPrivilegedUser(req)
+            ? {}
+            : { status: "published" };
 
-            if (!allowedTypes.includes(type)) {
+        if (type) {
+            if (!ALLOWED_TYPES.includes(type)) {
                 return res.status(400).json({
                     success: false,
                     message:
@@ -69,31 +103,30 @@ const getAllContent = async (req, res, next) => {
                 });
             }
 
-            filter.type = type;
+            where.type = type;
         }
 
-        // 4. Apply keyword search.
-        if (search && search.trim()) {
-            const escapedSearch = search
-                .trim()
-                .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-            const searchRegex = new RegExp(escapedSearch, "i");
-
-            filter.$or = [
-                { title: searchRegex },
-                { excerpt: searchRegex },
+        if (typeof search === "string" && search.trim()) {
+            where.OR = [
+                {
+                    title: {
+                        contains: search.trim(),
+                        mode: "insensitive",
+                    },
+                },
+                {
+                    excerpt: {
+                        contains: search.trim(),
+                        mode: "insensitive",
+                    },
+                },
             ];
         }
 
-        // 5. Read and validate pagination parameters.
-        const page = req.query.page === undefined
-            ? 1
-            : Number(req.query.page);
-
-        const limit = req.query.limit === undefined
-            ? 10
-            : Number(req.query.limit);
+        const page =
+            req.query.page === undefined ? 1 : Number(req.query.page);
+        const limit =
+            req.query.limit === undefined ? 10 : Number(req.query.limit);
 
         if (
             !Number.isInteger(page) ||
@@ -109,28 +142,29 @@ const getAllContent = async (req, res, next) => {
             });
         }
 
-        // 6. Calculate how many items to skip.
         const skip = (page - 1) * limit;
 
-        // 7. Count all documents matching the filters.
-        const total = await Content.countDocuments(filter);
+        const [total, contents] = await Promise.all([
+            prisma.content.count({ where }),
+            prisma.content.findMany({
+                where,
+                orderBy: { createdAt: "desc" },
+                skip,
+                take: limit,
+            }),
+        ]);
 
-        // 8. Retrieve only the requested page.
-        const contents = await Content.find(filter)
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
+        const totalPages = Math.ceil(total / limit);
 
-        // 9. Return the results and pagination details.
         return res.status(200).json({
             success: true,
             count: contents.length,
             pagination: {
                 totalItems: total,
                 currentPage: page,
-                totalPages: Math.ceil(total / limit),
+                totalPages,
                 pageSize: limit,
-                hasNextPage: page < Math.ceil(total / limit),
+                hasNextPage: page < totalPages,
                 hasPreviousPage: page > 1,
             },
             data: contents,
@@ -140,10 +174,12 @@ const getAllContent = async (req, res, next) => {
     }
 };
 
-// Get Single Content --- GET:ID
+// Get Single Content
 const getContentById = async (req, res, next) => {
     try {
-        const content = await Content.findById(req.params.id);
+        const content = await prisma.content.findUnique({
+            where: { id: req.params.id },
+        });
 
         if (!content) {
             return res.status(404).json({
@@ -152,11 +188,8 @@ const getContentById = async (req, res, next) => {
             });
         }
 
-        // Check whether the requester is an authenticated editor or admin.
-        const isAuthenticated =
-            req.user && ["admin", "editor"].includes(req.user.role);
+        const isAuthenticated = isPrivilegedUser(req);
 
-        // Hide drafts from public visitors.
         if (content.status !== "published" && !isAuthenticated) {
             return res.status(404).json({
                 success: false,
@@ -164,23 +197,25 @@ const getContentById = async (req, res, next) => {
             });
         }
 
-        // Count public views of published content only.
+        let result = content;
+
         if (content.status === "published" && !isAuthenticated) {
-            content.views += 1;
-            await content.save();
+            result = await prisma.content.update({
+                where: { id: content.id },
+                data: { views: { increment: 1 } },
+            });
         }
 
         return res.status(200).json({
             success: true,
-            data: content,
+            data: result,
         });
     } catch (error) {
         next(error);
     }
 };
 
-
-// Update Content ---- PUT
+// Update Content
 const updateContent = async (req, res, next) => {
     try {
         const {
@@ -194,8 +229,9 @@ const updateContent = async (req, res, next) => {
             videoSource,
         } = req.body;
 
-        // Find the content first
-        const existingContent = await Content.findById(req.params.id);
+        const existingContent = await prisma.content.findUnique({
+            where: { id: req.params.id },
+        });
 
         if (!existingContent) {
             return res.status(404).json({
@@ -204,10 +240,9 @@ const updateContent = async (req, res, next) => {
             });
         }
 
-        // Only admins or the content's owner can update it
         if (
             req.user.role !== "admin" &&
-            existingContent.author?.toString() !== req.user.id
+            existingContent.authorId !== req.user.id
         ) {
             return res.status(403).json({
                 success: false,
@@ -215,28 +250,67 @@ const updateContent = async (req, res, next) => {
             });
         }
 
-        // Update only the permitted fields
-        if (title !== undefined) existingContent.title = title;
-        if (type !== undefined) existingContent.type = type;
-        if (content !== undefined) existingContent.content = content;
-        if (excerpt !== undefined) existingContent.excerpt = excerpt;
+        if (title !== undefined && (
+            typeof title !== "string" || !title.trim()
+        )) {
+            return res.status(400).json({
+                success: false,
+                message: "Title cannot be empty",
+            });
+        }
+
+        if (type !== undefined && !ALLOWED_TYPES.includes(type)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid content type",
+            });
+        }
+
+        const data = {};
+
+        if (title !== undefined) data.title = title.trim();
+        if (type !== undefined) data.type = type;
+        if (content !== undefined) data.content = content;
+        if (excerpt !== undefined) data.excerpt = excerpt;
         if (featuredImage !== undefined) {
-            existingContent.featuredImage = featuredImage;
+            data.featuredImage = featuredImage;
         }
-        if (videoUrl !== undefined) existingContent.videoUrl = videoUrl;
-        if (videoSource !== undefined) {
-            existingContent.videoSource = videoSource;
+        if (videoUrl !== undefined) data.videoUrl = videoUrl;
+        if (videoSource !== undefined) data.videoSource = videoSource;
+
+        if (category !== undefined) {
+            data.categoryId = category || null;
         }
-        if (category !== undefined) existingContent.category = category;
 
-        await existingContent.save();
+        const updatedContent = await prisma.content.update({
+            where: { id: req.params.id },
+            data,
+        });
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: "Content updated successfully",
-            data: existingContent,
+            data: updatedContent,
         });
     } catch (error) {
+        if (error.code === "P2002") {
+            return res.status(409).json({
+                success: false,
+                message: "Content with this slug already exists",
+            });
+        }
+        if (error.code === "P2003") {
+            return res.status(400).json({
+                success: false,
+                message: "The selected category does not exist",
+            });
+        }
+        if (error.code === "P2025") {
+            return res.status(404).json({
+                success: false,
+                message: "Content not found",
+            });
+        }
         next(error);
     }
 };
@@ -244,29 +318,30 @@ const updateContent = async (req, res, next) => {
 // Delete Content
 const deleteContent = async (req, res, next) => {
     try {
-        const deletedContent = await Content.findByIdAndDelete(req.params.id);
+        const deletedContent = await prisma.content.delete({
+            where: { id: req.params.id },
+        });
 
-        if (!deletedContent) {
+        return res.status(200).json({
+            success: true,
+            message: "Content deleted successfully",
+        });
+    } catch (error) {
+        if (error.code === "P2025") {
             return res.status(404).json({
                 success: false,
                 message: "Content not found",
             });
         }
-
-        res.status(200).json({
-            success: true,
-            message: "Content deleted successfully",
-        });
-    } catch (error) {
         next(error);
     }
 };
 
+// Publish or Unpublish Content
 const publishContent = async (req, res, next) => {
     try {
         const { status } = req.body;
 
-        // Accept only the two supported statuses
         if (!["draft", "published"].includes(status)) {
             return res.status(400).json({
                 success: false,
@@ -274,8 +349,9 @@ const publishContent = async (req, res, next) => {
             });
         }
 
-        // Find the content
-        const existingContent = await Content.findById(req.params.id);
+        const existingContent = await prisma.content.findUnique({
+            where: { id: req.params.id },
+        });
 
         if (!existingContent) {
             return res.status(404).json({
@@ -284,11 +360,9 @@ const publishContent = async (req, res, next) => {
             });
         }
 
-        // Editors can change the status of their own content only.
-        // Admins can change the status of any content.
         if (
             req.user.role !== "admin" &&
-            existingContent.author?.toString() !== req.user.id
+            existingContent.authorId !== req.user.id
         ) {
             return res.status(403).json({
                 success: false,
@@ -296,17 +370,16 @@ const publishContent = async (req, res, next) => {
             });
         }
 
-        // Update publication status and date
-        existingContent.status = status;
-
-        if (status === "published") {
-            existingContent.publishedAt =
-                existingContent.publishedAt || new Date();
-        } else {
-            existingContent.publishedAt = null;
-        }
-
-        await existingContent.save();
+        const updatedContent = await prisma.content.update({
+            where: { id: req.params.id },
+            data: {
+                status,
+                publishedAt:
+                    status === "published"
+                        ? existingContent.publishedAt || new Date()
+                        : null,
+            },
+        });
 
         return res.status(200).json({
             success: true,
@@ -314,9 +387,15 @@ const publishContent = async (req, res, next) => {
                 status === "published"
                     ? "Content published successfully"
                     : "Content moved to draft successfully",
-            data: existingContent,
+            data: updatedContent,
         });
     } catch (error) {
+        if (error.code === "P2025") {
+            return res.status(404).json({
+                success: false,
+                message: "Content not found",
+            });
+        }
         next(error);
     }
 };

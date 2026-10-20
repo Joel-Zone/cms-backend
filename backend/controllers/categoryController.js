@@ -1,23 +1,37 @@
-
-const Category = require("../models/Category");
-const Content = require("../models/Content");
+const prisma = require("../config/prisma");
 
 // Create Category
 const createCategory = async (req, res, next) => {
     try {
         const { name, description } = req.body;
 
-        const category = await Category.create({
-            name,
-            description,
+        if (!name || !name.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Category name is required",
+            });
+        }
+
+        const category = await prisma.category.create({
+            data: {
+                name: name.trim(),
+                description: description ?? "",
+            },
         });
 
-        res.status(201).json({
+        return res.status(201).json({
             success: true,
             message: "Category created successfully",
             data: category,
         });
     } catch (error) {
+        if (error.code === "P2002") {
+            return res.status(409).json({
+                success: false,
+                message: "A category with this name already exists",
+            });
+        }
+
         next(error);
     }
 };
@@ -25,9 +39,13 @@ const createCategory = async (req, res, next) => {
 // Get All Categories
 const getAllCategories = async (req, res, next) => {
     try {
-        const categories = await Category.find().sort({ name: 1 });
+        const categories = await prisma.category.findMany({
+            orderBy: {
+                name: "asc",
+            },
+        });
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             count: categories.length,
             data: categories,
@@ -40,7 +58,11 @@ const getAllCategories = async (req, res, next) => {
 // Get Single Category
 const getCategoryById = async (req, res, next) => {
     try {
-        const category = await Category.findById(req.params.id);
+        const category = await prisma.category.findUnique({
+            where: {
+                id: req.params.id,
+            },
+        });
 
         if (!category) {
             return res.status(404).json({
@@ -49,7 +71,7 @@ const getCategoryById = async (req, res, next) => {
             });
         }
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             data: category,
         });
@@ -62,38 +84,62 @@ const getCategoryById = async (req, res, next) => {
 const updateCategory = async (req, res, next) => {
     try {
         const { name, description } = req.body;
+        const data = {};
 
-        const category = await Category.findByIdAndUpdate(
-            req.params.id,
-            { name, description },
-            {
-                new: true,
-                runValidators: true,
+        if (name !== undefined) {
+            if (!name.trim()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Category name cannot be empty",
+                });
             }
-        );
 
-        if (!category) {
-            return res.status(404).json({
-                success: false,
-                message: "Category not found",
-            });
+            data.name = name.trim();
         }
 
-        res.status(200).json({
+        if (description !== undefined) {
+            data.description = description;
+        }
+
+        const category = await prisma.category.update({
+            where: {
+                id: req.params.id,
+            },
+            data,
+        });
+
+        return res.status(200).json({
             success: true,
             message: "Category updated successfully",
             data: category,
         });
     } catch (error) {
+        if (error.code === "P2025") {
+            return res.status(404).json({
+                success: false,
+                message: "Category not found",
+            });
+        }
+
+        if (error.code === "P2002") {
+            return res.status(409).json({
+                success: false,
+                message: "A category with this name already exists",
+            });
+        }
+
         next(error);
     }
 };
 
-
 // Delete Category
 const deleteCategory = async (req, res, next) => {
     try {
-        const category = await Category.findById(req.params.id);
+        const category = await prisma.category.findUnique({
+            where: {
+                id: req.params.id,
+            },
+        });
 
         if (!category) {
             return res.status(404).json({
@@ -102,25 +148,39 @@ const deleteCategory = async (req, res, next) => {
             });
         }
 
-        // Check whether any content uses this category
-        const contentUsingCategory = await Content.exists({
-            category: category._id,
+        // Prevent deletion if content uses this category
+        const contentUsingCategory = await prisma.content.count({
+            where: {
+                categoryId: category.id,
+            },
         });
 
-        if (contentUsingCategory) {
+        if (contentUsingCategory > 0) {
             return res.status(409).json({
                 success: false,
-                message: "Cannot delete this category because it is being used by content.",
+                message:
+                    "Cannot delete this category because it is being used by content.",
             });
         }
 
-        await category.deleteOne();
+        await prisma.category.delete({
+            where: {
+                id: category.id,
+            },
+        });
 
         return res.status(200).json({
             success: true,
             message: "Category deleted successfully",
         });
     } catch (error) {
+        if (error.code === "P2025") {
+            return res.status(404).json({
+                success: false,
+                message: "Category not found",
+            });
+        }
+
         next(error);
     }
 };

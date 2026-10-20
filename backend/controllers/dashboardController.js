@@ -1,62 +1,54 @@
+const prisma = require("../config/prisma");
 
-const Content = require("../models/Content");
-const Category = require("../models/Category");
+const CONTENT_TYPES = ["article", "news", "page", "announcement"];
 
 const getDashboardStats = async (req, res, next) => {
     try {
-        // Count all content documents.
-        const totalContent = await Content.countDocuments();
+        const [
+            totalContent,
+            publishedContent,
+            draftContent,
+            totalCategories,
+            viewsResult,
+            contentByTypeResult,
+        ] = await Promise.all([
+            prisma.content.count(),
 
-        // Count published content.
-        const publishedContent = await Content.countDocuments({
-            status: "published",
-        });
+            prisma.content.count({
+                where: { status: "published" },
+            }),
 
-        // Count draft content.
-        const draftContent = await Content.countDocuments({
-            status: "draft",
-        });
+            prisma.content.count({
+                where: { status: "draft" },
+            }),
 
-        // Count all categories.
-        const totalCategories = await Category.countDocuments();
+            prisma.category.count(),
 
-        // Calculate total views across all content.
-        const viewsResult = await Content.aggregate([
-            {
-                $group: {
-                    _id: null,
-                    totalViews: { $sum: "$views" },
-                },
-            },
+            prisma.content.aggregate({
+                _sum: { views: true },
+            }),
+
+            prisma.content.groupBy({
+                by: ["type"],
+                _count: { _all: true },
+            }),
         ]);
 
-        const totalViews = viewsResult.length > 0
-            ? viewsResult[0].totalViews
-            : 0;
-
-        // Count content by type.
-        const contentByType = await Content.aggregate([
-            {
-                $group: {
-                    _id: "$type",
-                    count: { $sum: 1 },
-                },
-            },
-        ]);
-
-        // Return counts for every supported content type.
-        const contentTypes = {
+        const contentByType = {
             article: 0,
             news: 0,
             page: 0,
             announcement: 0,
         };
 
-        contentByType.forEach((item) => {
-            if (Object.prototype.hasOwnProperty.call(contentTypes, item._id)) {
-                contentTypes[item._id] = item.count;
+        for (const item of contentByTypeResult) {
+            if (Object.prototype.hasOwnProperty.call(
+                contentByType,
+                item.type
+            )) {
+                contentByType[item.type] = item._count._all;
             }
-        });
+        }
 
         return res.status(200).json({
             success: true,
@@ -65,8 +57,8 @@ const getDashboardStats = async (req, res, next) => {
                 publishedContent,
                 draftContent,
                 totalCategories,
-                totalViews,
-                contentByType: contentTypes,
+                totalViews: viewsResult._sum.views ?? 0,
+                contentByType,
             },
         });
     } catch (error) {
@@ -74,14 +66,27 @@ const getDashboardStats = async (req, res, next) => {
     }
 };
 
-
 const getRecentContent = async (req, res, next) => {
     try {
-        const recentContent = await Content.find()
-            .sort({ updatedAt: -1 })
-            .limit(5)
-            .populate("author", "name email")
-            .select("title slug type status updatedAt author");
+        const recentContent = await prisma.content.findMany({
+            orderBy: {
+                updatedAt: "desc",
+            },
+            take: 5,
+            select: {
+                title: true,
+                slug: true,
+                type: true,
+                status: true,
+                updatedAt: true,
+                author: {
+                    select: {
+                        name: true,
+                        email: true,
+                    },
+                },
+            },
+        });
 
         return res.status(200).json({
             success: true,
@@ -95,59 +100,55 @@ const getRecentContent = async (req, res, next) => {
 
 const getSevenDayViews = async (req, res, next) => {
     try {
+        // Use UTC calendar days consistently for date boundaries.
         const today = new Date();
-
-        // Start at midnight today.
         const endDate = new Date(today);
-        endDate.setHours(24, 0, 0, 0);
+        endDate.setUTCHours(0, 0, 0, 0);
+        endDate.setUTCDate(endDate.getUTCDate() + 1);
 
-        // Start at midnight six days ago.
         const startDate = new Date(endDate);
-        startDate.setDate(startDate.getDate() - 7);
+        startDate.setUTCDate(startDate.getUTCDate() - 7);
 
-        // Get published content created or published in the period.
-        const viewsData = await Content.aggregate([
-            {
-                $match: {
-                    status: "published",
-                    publishedAt: {
-                        $gte: startDate,
-                        $lt: endDate,
-                    },
+        const viewsData = await prisma.content.findMany({
+            where: {
+                status: "published",
+                publishedAt: {
+                    gte: startDate,
+                    lt: endDate,
                 },
             },
-            {
-                $group: {
-                    _id: {
-                        year: { $year: "$publishedAt" },
-                        month: { $month: "$publishedAt" },
-                        day: { $dayOfMonth: "$publishedAt" },
-                    },
-                    views: { $sum: "$views" },
-                },
+            select: {
+                publishedAt: true,
+                views: true,
             },
-        ]);
+        });
 
-        // Build seven calendar-day entries, including zero-view days.
+        const viewsByDay = new Map();
+
+        for (const item of viewsData) {
+            if (!item.publishedAt) continue;
+
+            const dateKey = item.publishedAt
+                .toISOString()
+                .slice(0, 10);
+
+            viewsByDay.set(
+                dateKey,
+                (viewsByDay.get(dateKey) ?? 0) + item.views
+            );
+        }
+
         const data = [];
 
         for (let i = 0; i < 7; i++) {
             const date = new Date(startDate);
-            date.setDate(startDate.getDate() + i);
+            date.setUTCDate(startDate.getUTCDate() + i);
 
-            const year = date.getFullYear();
-            const month = date.getMonth() + 1;
-            const day = date.getDate();
-
-            const matchingDay = viewsData.find((item) =>
-                item._id.year === year &&
-                item._id.month === month &&
-                item._id.day === day
-            );
+            const dateKey = date.toISOString().slice(0, 10);
 
             data.push({
-                date: date.toISOString().slice(0, 10),
-                views: matchingDay ? matchingDay.views : 0,
+                date: dateKey,
+                views: viewsByDay.get(dateKey) ?? 0,
             });
         }
 
